@@ -260,18 +260,22 @@ function resetToUpload() {
 }
 
 // Tile Rendering
-function renderTiles() {
+let initialRender = true
+
+function renderTiles(animate = false) {
   tilesGrid.innerHTML = ''
 
   tiles.forEach((text, index) => {
-    const tile = createTileElement(text, index)
+    const tile = createTileElement(text, index, animate || initialRender)
     tilesGrid.appendChild(tile)
   })
+
+  initialRender = false
 }
 
-function createTileElement(text, index) {
+function createTileElement(text, index, animate = false) {
   const tile = document.createElement('div')
-  tile.className = 'tile'
+  tile.className = animate ? 'tile' : 'tile no-animate'
   tile.dataset.index = index
   tile.draggable = true
 
@@ -475,6 +479,6 @@ function shuffleTiles() {
   }
 
   saveState()
-  renderTiles()
+  renderTiles(true)  // Animate on shuffle
 }
 

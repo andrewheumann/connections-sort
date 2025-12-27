@@ -380,8 +380,12 @@ body::before {
   }
 }
 
-.tile {
+.tile:not(.no-animate) {
   animation: tileEnter 0.3s ease backwards;
+}
+
+.tile.no-animate {
+  animation: none;
 }
 
 .tile:nth-child(1) { animation-delay: 0.02s; }
