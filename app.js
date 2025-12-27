@@ -84,50 +84,147 @@ function loadImage(file) {
   })
 }
 
+// Crop to the grid area of a Connections screenshot
+function cropToGrid(img) {
+  // Grid is roughly in middle of iPhone screenshot
+  // These values work for standard iPhone Connections screenshots
+  const startY = Math.floor(img.height * 0.18)
+  const endY = Math.floor(img.height * 0.62)
+  const startX = Math.floor(img.width * 0.02)
+  const endX = Math.floor(img.width * 0.98)
+
+  const width = endX - startX
+  const height = endY - startY
+
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const ctx = canvas.getContext('2d')
+
+  ctx.drawImage(img, startX, startY, width, height, 0, 0, width, height)
+
+  console.log(`Crop: y=${startY}-${endY}, x=${startX}-${endX}`)
+
+  return { canvas, ctx, width, height }
+}
+
+// Apply threshold to convert to black and white
+function applyThreshold(canvas, ctx, threshold = 120) {
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+  const data = imageData.data
+
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i]
+    const g = data[i + 1]
+    const b = data[i + 2]
+
+    const lum = 0.299 * r + 0.587 * g + 0.114 * b
+
+    if (lum > threshold) {
+      data[i] = 255
+      data[i + 1] = 255
+      data[i + 2] = 255
+    } else {
+      data[i] = 0
+      data[i + 1] = 0
+      data[i + 2] = 0
+    }
+  }
+
+  const newCanvas = document.createElement('canvas')
+  newCanvas.width = canvas.width
+  newCanvas.height = canvas.height
+  const newCtx = newCanvas.getContext('2d')
+  newCtx.putImageData(imageData, 0, 0)
+
+  return newCanvas.toDataURL('image/png')
+}
+
+// Extract a single row from the grid
+function extractRow(canvas, rowIndex, totalRows = 4) {
+  const rowHeight = canvas.height / totalRows
+  const rowCanvas = document.createElement('canvas')
+  rowCanvas.width = canvas.width
+  rowCanvas.height = rowHeight
+  const rowCtx = rowCanvas.getContext('2d')
+
+  rowCtx.drawImage(
+    canvas,
+    0, rowIndex * rowHeight, canvas.width, rowHeight,
+    0, 0, canvas.width, rowHeight
+  )
+
+  return { canvas: rowCanvas, ctx: rowCtx }
+}
+
 async function extractTextFromImage(imageData) {
   showProcessing('Initializing OCR...')
 
   try {
+    // Load the image to get dimensions
+    const img = await loadImageElement(imageData)
+    console.log('Image dimensions:', img.width, 'x', img.height)
+
+    showProcessing('Processing image...')
+
+    // Create canvas with full image
+    const canvas = document.createElement('canvas')
+    canvas.width = img.width
+    canvas.height = img.height
+    const ctx = canvas.getContext('2d')
+    ctx.drawImage(img, 0, 0)
+
+    // Apply threshold to make text clearer
+    const processedImage = applyThreshold(canvas, ctx, 140)
+
+    showProcessing('Running OCR...')
+
     const worker = await Tesseract.createWorker('eng')
-
-    showProcessing('Analyzing screenshot...')
-
-    // Configure for better recognition of short uppercase words
-    await worker.setParameters({
-      tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 -\'&',
-    })
-
-    const result = await worker.recognize(imageData)
-
-    showProcessing('Extracting tiles...')
-
+    const result = await worker.recognize(processedImage)
     console.log('OCR raw text:', result.data.text)
-    console.log('OCR words found:', result.data.words?.length || 0)
-
-    // Extract words from OCR result
-    const extractedTiles = extractTilesFromOCR(result)
-    console.log('Extracted tiles:', extractedTiles)
-
     await worker.terminate()
 
-    if (extractedTiles.length < 16) {
-      // If we didn't get enough tiles, try a different approach
-      console.log('Only found', extractedTiles.length, 'tiles, attempting fallback extraction')
-      const fallbackTiles = extractTilesFallback(result.data.text)
+    // Extract all words
+    const allWords = extractWordsFromText(result.data.text)
+    console.log('All extracted words:', allWords)
 
-      if (fallbackTiles.length >= 16) {
-        tiles = fallbackTiles.slice(0, 16)
-      } else if (extractedTiles.length > 0) {
-        // Pad with placeholders if needed
-        tiles = extractedTiles
-        while (tiles.length < 16) {
-          tiles.push(`TILE ${tiles.length + 1}`)
+    // Filter to valid tile words (removes UI text)
+    const validTiles = allWords.filter(w => isValidTileWord(w))
+    console.log('Valid tiles after filtering:', validTiles)
+
+    // If we don't have enough, try without threshold
+    if (validTiles.length < 16) {
+      console.log('Not enough tiles, trying original image...')
+      showProcessing('Retrying OCR...')
+
+      const worker2 = await Tesseract.createWorker('eng')
+      const result2 = await worker2.recognize(imageData)
+      console.log('OCR raw text (original):', result2.data.text)
+      await worker2.terminate()
+
+      const words2 = extractWordsFromText(result2.data.text)
+      const validTiles2 = words2.filter(w => isValidTileWord(w))
+      console.log('Valid tiles from original:', validTiles2)
+
+      // Merge both results
+      for (const tile of validTiles2) {
+        if (!validTiles.includes(tile)) {
+          validTiles.push(tile)
         }
-      } else {
-        throw new Error('Could not extract enough tiles from the image')
       }
+      console.log('Combined tiles:', validTiles)
+    }
+
+    if (validTiles.length >= 16) {
+      tiles = validTiles.slice(0, 16)
+    } else if (validTiles.length > 0) {
+      tiles = validTiles
+      while (tiles.length < 16) {
+        tiles.push(`TILE ${tiles.length + 1}`)
+      }
+      console.log(`Only found ${validTiles.length} tiles, padded to 16`)
     } else {
-      tiles = extractedTiles.slice(0, 16)
+      throw new Error('Could not extract tiles from the image. Please try a clearer screenshot.')
     }
 
     saveState()
@@ -141,158 +238,23 @@ async function extractTextFromImage(imageData) {
   }
 }
 
-function extractTilesFromOCR(result) {
-  const allWords = []
-
-  // Collect all valid words with their positions
-  if (result.data.words) {
-    for (const word of result.data.words) {
-      const text = word.text.trim().toUpperCase()
-
-      if (isValidTileWord(text) && word.confidence > 50) {
-        allWords.push({
-          text: text,
-          confidence: word.confidence,
-          bbox: word.bbox,
-          centerY: (word.bbox.y0 + word.bbox.y1) / 2,
-          centerX: (word.bbox.x0 + word.bbox.x1) / 2
-        })
-      }
-    }
-  }
-
-  if (allWords.length === 0) return []
-
-  // Find the grid region by looking for clusters of words
-  // The Connections grid is typically 4 rows of 4 words each
-  // Sort by Y position to find row clusters
-  const sortedByY = [...allWords].sort((a, b) => a.centerY - b.centerY)
-
-  // Find image height from the max Y coordinate
-  const maxY = Math.max(...allWords.map(w => w.bbox.y1))
-  const minY = Math.min(...allWords.map(w => w.bbox.y0))
-  const imageHeight = maxY - minY
-
-  // The grid is usually in the upper-middle portion (roughly 15-75% of content area)
-  // Filter to words in this region
-  const gridMinY = minY + imageHeight * 0.1
-  const gridMaxY = minY + imageHeight * 0.85
-
-  const gridWords = allWords.filter(w =>
-    w.centerY >= gridMinY && w.centerY <= gridMaxY
-  )
-
-  if (gridWords.length < 16) {
-    // If filtering removed too many, use all words
-    console.log('Grid filtering too aggressive, using all words')
-  }
-
-  const wordsToUse = gridWords.length >= 16 ? gridWords : allWords
-
-  // Cluster words into 4 rows based on Y position
-  const rows = clusterIntoRows(wordsToUse, 4)
-
-  // Sort each row by X position (left to right)
-  const sortedRows = rows.map(row =>
-    row.sort((a, b) => a.centerX - b.centerX)
-  )
-
-  // Flatten and take the text, limiting to 4 per row
-  const tiles = []
-  for (const row of sortedRows) {
-    const rowTiles = row.slice(0, 4).map(w => w.text)
-    tiles.push(...rowTiles)
-  }
-
-  // Remove duplicates while preserving order
-  const seen = new Set()
-  const uniqueTiles = tiles.filter(text => {
-    if (seen.has(text)) return false
-    seen.add(text)
-    return true
-  })
-
-  return uniqueTiles
-}
-
-function clusterIntoRows(words, numRows) {
-  if (words.length === 0) return Array(numRows).fill([])
-
-  // Sort by Y position
-  const sorted = [...words].sort((a, b) => a.centerY - b.centerY)
-
-  // Use k-means-like clustering to find row centers
-  const yPositions = sorted.map(w => w.centerY)
-  const minY = Math.min(...yPositions)
-  const maxY = Math.max(...yPositions)
-  const range = maxY - minY
-
-  // Initialize row boundaries evenly
-  const rowHeight = range / numRows
-
-  // Assign words to rows based on Y position
-  const rows = Array(numRows).fill(null).map(() => [])
-
-  for (const word of sorted) {
-    const rowIndex = Math.min(
-      numRows - 1,
-      Math.floor((word.centerY - minY) / (rowHeight + 0.001))
-    )
-    rows[rowIndex].push(word)
-  }
-
-  // If some rows are empty or have too few words, redistribute
-  // This handles cases where clustering didn't work well
-  const flatWords = sorted.slice()
-  const wordsPerRow = Math.ceil(flatWords.length / numRows)
-
-  // Check if distribution is reasonable (each row should have ~4 words)
-  const hasReasonableDistribution = rows.every(r => r.length >= 2 && r.length <= 6)
-
-  if (!hasReasonableDistribution && flatWords.length >= 16) {
-    // Fall back to simple division
-    const redistributedRows = Array(numRows).fill(null).map(() => [])
-    flatWords.forEach((word, i) => {
-      const rowIndex = Math.min(numRows - 1, Math.floor(i / 4))
-      redistributedRows[rowIndex].push(word)
-    })
-    return redistributedRows
-  }
-
-  return rows
-}
-
-function extractTilesFallback(text) {
-  console.log('Fallback extraction from raw text:', text)
-
-  // Fallback: split text by lines and filter
-  const lines = text.split('\n')
-  const words = []
-
-  for (const line of lines) {
-    const trimmed = line.trim().toUpperCase()
-
-    // Split line by multiple spaces or single spaces
-    const parts = trimmed.split(/\s+/)
-
-    for (const part of parts) {
-      const cleaned = part.trim()
-      if (isValidTileWord(cleaned)) {
-        words.push(cleaned)
-      }
-    }
-  }
-
-  console.log('Fallback found words:', words)
-
-  // Remove duplicates while preserving order
-  const seen = new Set()
-  return words.filter(word => {
-    if (seen.has(word)) return false
-    seen.add(word)
-    return true
+// Helper to load image as HTMLImageElement
+function loadImageElement(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image()
+    img.onload = () => resolve(img)
+    img.onerror = reject
+    img.src = src
   })
 }
+
+// Extract words from OCR text
+function extractWordsFromText(text) {
+  const upperText = text.toUpperCase()
+  const words = upperText.match(/[A-Z]{2,}/g) || []
+  return words
+}
+
 
 function isValidTileWord(text) {
   if (!text || text.length === 0) return false
