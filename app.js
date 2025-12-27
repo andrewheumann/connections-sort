@@ -101,8 +101,12 @@ async function extractTextFromImage(imageData) {
 
     showProcessing('Extracting tiles...')
 
+    console.log('OCR raw text:', result.data.text)
+    console.log('OCR words found:', result.data.words?.length || 0)
+
     // Extract words from OCR result
     const extractedTiles = extractTilesFromOCR(result)
+    console.log('Extracted tiles:', extractedTiles)
 
     await worker.terminate()
 
@@ -138,49 +142,129 @@ async function extractTextFromImage(imageData) {
 }
 
 function extractTilesFromOCR(result) {
-  const words = []
+  const allWords = []
 
-  // Connections tiles are typically in a 4x4 grid with uppercase text
-  // We'll look for words that appear to be tile content
-
+  // Collect all valid words with their positions
   if (result.data.words) {
     for (const word of result.data.words) {
       const text = word.text.trim().toUpperCase()
 
-      // Filter out common UI elements and keep likely tile words
-      if (isValidTileWord(text)) {
-        words.push({
+      if (isValidTileWord(text) && word.confidence > 50) {
+        allWords.push({
           text: text,
           confidence: word.confidence,
-          bbox: word.bbox
+          bbox: word.bbox,
+          centerY: (word.bbox.y0 + word.bbox.y1) / 2,
+          centerX: (word.bbox.x0 + word.bbox.x1) / 2
         })
       }
     }
   }
 
-  // Sort by position (top to bottom, left to right) to maintain grid order
-  words.sort((a, b) => {
-    const rowA = Math.floor(a.bbox.y0 / 50)
-    const rowB = Math.floor(b.bbox.y0 / 50)
-    if (rowA !== rowB) return rowA - rowB
-    return a.bbox.x0 - b.bbox.x0
-  })
+  if (allWords.length === 0) return []
 
-  // Filter to get unique meaningful words
-  const seen = new Set()
-  const uniqueWords = []
+  // Find the grid region by looking for clusters of words
+  // The Connections grid is typically 4 rows of 4 words each
+  // Sort by Y position to find row clusters
+  const sortedByY = [...allWords].sort((a, b) => a.centerY - b.centerY)
 
-  for (const word of words) {
-    if (!seen.has(word.text) && word.text.length > 0) {
-      seen.add(word.text)
-      uniqueWords.push(word.text)
-    }
+  // Find image height from the max Y coordinate
+  const maxY = Math.max(...allWords.map(w => w.bbox.y1))
+  const minY = Math.min(...allWords.map(w => w.bbox.y0))
+  const imageHeight = maxY - minY
+
+  // The grid is usually in the upper-middle portion (roughly 15-75% of content area)
+  // Filter to words in this region
+  const gridMinY = minY + imageHeight * 0.1
+  const gridMaxY = minY + imageHeight * 0.85
+
+  const gridWords = allWords.filter(w =>
+    w.centerY >= gridMinY && w.centerY <= gridMaxY
+  )
+
+  if (gridWords.length < 16) {
+    // If filtering removed too many, use all words
+    console.log('Grid filtering too aggressive, using all words')
   }
 
-  return uniqueWords
+  const wordsToUse = gridWords.length >= 16 ? gridWords : allWords
+
+  // Cluster words into 4 rows based on Y position
+  const rows = clusterIntoRows(wordsToUse, 4)
+
+  // Sort each row by X position (left to right)
+  const sortedRows = rows.map(row =>
+    row.sort((a, b) => a.centerX - b.centerX)
+  )
+
+  // Flatten and take the text, limiting to 4 per row
+  const tiles = []
+  for (const row of sortedRows) {
+    const rowTiles = row.slice(0, 4).map(w => w.text)
+    tiles.push(...rowTiles)
+  }
+
+  // Remove duplicates while preserving order
+  const seen = new Set()
+  const uniqueTiles = tiles.filter(text => {
+    if (seen.has(text)) return false
+    seen.add(text)
+    return true
+  })
+
+  return uniqueTiles
+}
+
+function clusterIntoRows(words, numRows) {
+  if (words.length === 0) return Array(numRows).fill([])
+
+  // Sort by Y position
+  const sorted = [...words].sort((a, b) => a.centerY - b.centerY)
+
+  // Use k-means-like clustering to find row centers
+  const yPositions = sorted.map(w => w.centerY)
+  const minY = Math.min(...yPositions)
+  const maxY = Math.max(...yPositions)
+  const range = maxY - minY
+
+  // Initialize row boundaries evenly
+  const rowHeight = range / numRows
+
+  // Assign words to rows based on Y position
+  const rows = Array(numRows).fill(null).map(() => [])
+
+  for (const word of sorted) {
+    const rowIndex = Math.min(
+      numRows - 1,
+      Math.floor((word.centerY - minY) / (rowHeight + 0.001))
+    )
+    rows[rowIndex].push(word)
+  }
+
+  // If some rows are empty or have too few words, redistribute
+  // This handles cases where clustering didn't work well
+  const flatWords = sorted.slice()
+  const wordsPerRow = Math.ceil(flatWords.length / numRows)
+
+  // Check if distribution is reasonable (each row should have ~4 words)
+  const hasReasonableDistribution = rows.every(r => r.length >= 2 && r.length <= 6)
+
+  if (!hasReasonableDistribution && flatWords.length >= 16) {
+    // Fall back to simple division
+    const redistributedRows = Array(numRows).fill(null).map(() => [])
+    flatWords.forEach((word, i) => {
+      const rowIndex = Math.min(numRows - 1, Math.floor(i / 4))
+      redistributedRows[rowIndex].push(word)
+    })
+    return redistributedRows
+  }
+
+  return rows
 }
 
 function extractTilesFallback(text) {
+  console.log('Fallback extraction from raw text:', text)
+
   // Fallback: split text by lines and filter
   const lines = text.split('\n')
   const words = []
@@ -188,8 +272,8 @@ function extractTilesFallback(text) {
   for (const line of lines) {
     const trimmed = line.trim().toUpperCase()
 
-    // Split line by multiple spaces (tiles might be on same line)
-    const parts = trimmed.split(/\s{2,}/)
+    // Split line by multiple spaces or single spaces
+    const parts = trimmed.split(/\s+/)
 
     for (const part of parts) {
       const cleaned = part.trim()
@@ -198,6 +282,8 @@ function extractTilesFallback(text) {
       }
     }
   }
+
+  console.log('Fallback found words:', words)
 
   // Remove duplicates while preserving order
   const seen = new Set()
@@ -211,19 +297,35 @@ function extractTilesFallback(text) {
 function isValidTileWord(text) {
   if (!text || text.length === 0) return false
   if (text.length > 20) return false
+  if (text.length < 2) return false  // Tile words are at least 2 chars
 
-  // Filter out common UI text
+  // Filter out common UI text from Connections app
   const uiWords = [
-    'CONNECTIONS', 'CREATE', 'SHUFFLE', 'DESELECT', 'SUBMIT',
-    'TODAY', 'ARCHIVE', 'PLAY', 'NYT', 'GAMES', 'MENU',
-    'MISTAKES', 'REMAINING', 'ONE', 'TWO', 'THREE', 'FOUR',
-    'NEXT', 'BACK', 'SHARE', 'RESULTS', 'VIEW'
+    'CONNECTIONS', 'CONNECTION', 'CREATE', 'SHUFFLE', 'DESELECT', 'SUBMIT',
+    'TODAY', 'ARCHIVE', 'PLAY', 'NYT', 'GAMES', 'MENU', 'GAME',
+    'MISTAKES', 'REMAINING', 'ONE', 'TWO', 'THREE', 'FOUR', 'FIVE',
+    'NEXT', 'BACK', 'SHARE', 'RESULTS', 'VIEW', 'ALL', 'OF',
+    'GROUPS', 'GROUP', 'CORRECT', 'INCORRECT', 'GUESS', 'GUESSES',
+    'SETTINGS', 'HELP', 'HOW', 'TO', 'THE', 'AND', 'FOR', 'WITH',
+    'YOUR', 'YOU', 'ARE', 'WAS', 'WERE', 'BEEN', 'BEING',
+    'AM', 'PM', 'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
+    'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'
   ]
 
   if (uiWords.includes(text)) return false
 
+  // Filter out time patterns like "11:29"
+  if (/^\d{1,2}:\d{2}$/.test(text)) return false
+
+  // Filter out pure numbers
+  if (/^\d+$/.test(text)) return false
+
   // Must have at least one letter
   if (!/[A-Z]/.test(text)) return false
+
+  // Filter out very short common words that aren't likely tiles
+  const shortCommonWords = ['A', 'I', 'AN', 'AS', 'AT', 'BE', 'BY', 'DO', 'GO', 'HE', 'IF', 'IN', 'IS', 'IT', 'ME', 'MY', 'NO', 'ON', 'OR', 'SO', 'UP', 'US', 'WE']
+  if (shortCommonWords.includes(text)) return false
 
   return true
 }
