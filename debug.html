@@ -114,25 +114,60 @@
       }
       ctx2.putImageData(imageData, 0, 0);
 
-      // Run OCR
-      document.getElementById('rawText').textContent = 'Running OCR...';
+      // Run OCR with different PSM modes
+      document.getElementById('rawText').textContent = 'Running OCR with multiple PSM modes...';
 
-      const worker = await Tesseract.createWorker('eng');
-      const result = await worker.recognize(threshCanvas);
-      await worker.terminate();
+      let allFoundWords = [];
+      let allRawText = '';
 
-      const rawText = result.data.text;
-      document.getElementById('rawText').textContent = rawText;
+      // Test PSM 3 (default), 6 (block), 11 (sparse), 7 (single line on rows)
+      for (const psm of ['3', '6', '11']) {
+        const worker = await Tesseract.createWorker('eng');
+        await worker.setParameters({ tessedit_pageseg_mode: psm });
+        const result = await worker.recognize(threshCanvas);
+        await worker.terminate();
 
-      const words = rawText.toUpperCase().match(/[A-Z]{2,}/g) || [];
-      document.getElementById('words').textContent = words.join(', ');
+        const words = result.data.text.toUpperCase().match(/[A-Z]{2,}/g) || [];
+        const validWords = words.filter(isValidTile);
+        const foundCount = validWords.filter(t => expected.includes(t)).length;
 
-      const validTiles = words.filter(isValidTile);
-      const found = validTiles.filter(t => expected.includes(t));
-      const missing = expected.filter(t => !validTiles.includes(t));
+        allRawText += `\n=== PSM ${psm} (found ${foundCount}) ===\n${result.data.text}\n`;
+
+        for (const w of validWords) {
+          if (!allFoundWords.includes(w)) allFoundWords.push(w);
+        }
+      }
+
+      // Also try row-by-row with PSM 7
+      const rowHeight = h / 4;
+      for (let row = 0; row < 4; row++) {
+        const rowCanvas = document.createElement('canvas');
+        rowCanvas.width = w;
+        rowCanvas.height = rowHeight;
+        const rowCtx = rowCanvas.getContext('2d');
+        rowCtx.drawImage(threshCanvas, 0, row * rowHeight, w, rowHeight, 0, 0, w, rowHeight);
+
+        const worker = await Tesseract.createWorker('eng');
+        await worker.setParameters({ tessedit_pageseg_mode: '7' });
+        const result = await worker.recognize(rowCanvas);
+        await worker.terminate();
+
+        const words = result.data.text.toUpperCase().match(/[A-Z]{2,}/g) || [];
+        allRawText += `\n=== Row ${row+1} PSM 7 ===\n${result.data.text}\n`;
+
+        for (const w of words.filter(isValidTile)) {
+          if (!allFoundWords.includes(w)) allFoundWords.push(w);
+        }
+      }
+
+      document.getElementById('rawText').textContent = allRawText;
+      document.getElementById('words').textContent = allFoundWords.join(', ');
+
+      const found = allFoundWords.filter(t => expected.includes(t));
+      const missing = expected.filter(t => !allFoundWords.includes(t));
 
       document.getElementById('tiles').textContent =
-        `Found ${found.length}/16:\n${found.join(', ')}\n\nMissing:\n${missing.join(', ')}\n\nAll valid words:\n${validTiles.join(', ')}`;
+        `Found ${found.length}/16:\n${found.join(', ')}\n\nMissing:\n${missing.join(', ')}\n\nAll valid words:\n${allFoundWords.join(', ')}`;
     }
   </script>
 </body>

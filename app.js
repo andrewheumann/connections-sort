@@ -84,145 +84,96 @@ function loadImage(file) {
   })
 }
 
-// Crop to the grid area of a Connections screenshot
-function cropToGrid(img) {
-  // Grid is roughly in middle of iPhone screenshot
-  // These values work for standard iPhone Connections screenshots
-  const startY = Math.floor(img.height * 0.18)
-  const endY = Math.floor(img.height * 0.62)
-  const startX = Math.floor(img.width * 0.02)
-  const endX = Math.floor(img.width * 0.98)
-
-  const width = endX - startX
-  const height = endY - startY
-
-  const canvas = document.createElement('canvas')
-  canvas.width = width
-  canvas.height = height
-  const ctx = canvas.getContext('2d')
-
-  ctx.drawImage(img, startX, startY, width, height, 0, 0, width, height)
-
-  console.log(`Crop: y=${startY}-${endY}, x=${startX}-${endX}`)
-
-  return { canvas, ctx, width, height }
-}
-
-// Apply threshold to convert to black and white
-function applyThreshold(canvas, ctx, threshold = 120) {
-  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
-  const data = imageData.data
-
-  for (let i = 0; i < data.length; i += 4) {
-    const r = data[i]
-    const g = data[i + 1]
-    const b = data[i + 2]
-
-    const lum = 0.299 * r + 0.587 * g + 0.114 * b
-
-    if (lum > threshold) {
-      data[i] = 255
-      data[i + 1] = 255
-      data[i + 2] = 255
-    } else {
-      data[i] = 0
-      data[i + 1] = 0
-      data[i + 2] = 0
-    }
-  }
-
-  const newCanvas = document.createElement('canvas')
-  newCanvas.width = canvas.width
-  newCanvas.height = canvas.height
-  const newCtx = newCanvas.getContext('2d')
-  newCtx.putImageData(imageData, 0, 0)
-
-  return newCanvas.toDataURL('image/png')
-}
-
-// Extract a single row from the grid
-function extractRow(canvas, rowIndex, totalRows = 4) {
-  const rowHeight = canvas.height / totalRows
-  const rowCanvas = document.createElement('canvas')
-  rowCanvas.width = canvas.width
-  rowCanvas.height = rowHeight
-  const rowCtx = rowCanvas.getContext('2d')
-
-  rowCtx.drawImage(
-    canvas,
-    0, rowIndex * rowHeight, canvas.width, rowHeight,
-    0, 0, canvas.width, rowHeight
-  )
-
-  return { canvas: rowCanvas, ctx: rowCtx }
-}
 
 async function extractTextFromImage(imageData) {
   showProcessing('Initializing OCR...')
 
   try {
-    // Load the image to get dimensions
+    // Load the image
     const img = await loadImageElement(imageData)
     console.log('Image dimensions:', img.width, 'x', img.height)
 
     showProcessing('Processing image...')
 
-    // Create canvas with full image
-    const canvas = document.createElement('canvas')
-    canvas.width = img.width
-    canvas.height = img.height
-    const ctx = canvas.getContext('2d')
-    ctx.drawImage(img, 0, 0)
+    // Crop to grid area
+    const startY = Math.floor(img.height * 0.18)
+    const endY = Math.floor(img.height * 0.62)
+    const startX = Math.floor(img.width * 0.02)
+    const endX = Math.floor(img.width * 0.98)
+    const w = endX - startX
+    const h = endY - startY
 
-    // Apply threshold to make text clearer
-    const processedImage = applyThreshold(canvas, ctx, 140)
+    const croppedCanvas = document.createElement('canvas')
+    croppedCanvas.width = w
+    croppedCanvas.height = h
+    const croppedCtx = croppedCanvas.getContext('2d')
+    croppedCtx.drawImage(img, startX, startY, w, h, 0, 0, w, h)
 
-    showProcessing('Running OCR...')
+    // Apply threshold
+    const threshCanvas = document.createElement('canvas')
+    threshCanvas.width = w
+    threshCanvas.height = h
+    const threshCtx = threshCanvas.getContext('2d')
+    threshCtx.drawImage(croppedCanvas, 0, 0)
 
-    const worker = await Tesseract.createWorker('eng')
-    const result = await worker.recognize(processedImage)
-    console.log('OCR raw text:', result.data.text)
-    await worker.terminate()
+    const imageData2 = threshCtx.getImageData(0, 0, w, h)
+    const data = imageData2.data
+    for (let i = 0; i < data.length; i += 4) {
+      const lum = 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2]
+      const val = lum > 120 ? 255 : 0
+      data[i] = data[i+1] = data[i+2] = val
+    }
+    threshCtx.putImageData(imageData2, 0, 0)
 
-    // Extract all words
-    const allWords = extractWordsFromText(result.data.text)
-    console.log('All extracted words:', allWords)
+    let allFoundWords = []
 
-    // Filter to valid tile words (removes UI text)
-    const validTiles = allWords.filter(w => isValidTileWord(w))
-    console.log('Valid tiles after filtering:', validTiles)
+    // Run OCR with PSM modes 3, 6, 11 on full grid
+    showProcessing('Running OCR (1/4)...')
+    for (const psm of ['3', '6', '11']) {
+      const worker = await Tesseract.createWorker('eng')
+      await worker.setParameters({ tessedit_pageseg_mode: psm })
+      const result = await worker.recognize(threshCanvas)
+      await worker.terminate()
 
-    // If we don't have enough, try without threshold
-    if (validTiles.length < 16) {
-      console.log('Not enough tiles, trying original image...')
-      showProcessing('Retrying OCR...')
-
-      const worker2 = await Tesseract.createWorker('eng')
-      const result2 = await worker2.recognize(imageData)
-      console.log('OCR raw text (original):', result2.data.text)
-      await worker2.terminate()
-
-      const words2 = extractWordsFromText(result2.data.text)
-      const validTiles2 = words2.filter(w => isValidTileWord(w))
-      console.log('Valid tiles from original:', validTiles2)
-
-      // Merge both results
-      for (const tile of validTiles2) {
-        if (!validTiles.includes(tile)) {
-          validTiles.push(tile)
-        }
+      const words = extractWordsFromText(result.data.text)
+      for (const word of words.filter(w => isValidTileWord(w))) {
+        if (!allFoundWords.includes(word)) allFoundWords.push(word)
       }
-      console.log('Combined tiles:', validTiles)
+      console.log(`PSM ${psm} found:`, words.filter(w => isValidTileWord(w)))
     }
 
-    if (validTiles.length >= 16) {
-      tiles = validTiles.slice(0, 16)
-    } else if (validTiles.length > 0) {
-      tiles = validTiles
+    // Row-by-row with PSM 7
+    showProcessing('Running OCR (2/4)...')
+    const rowHeight = h / 4
+    for (let row = 0; row < 4; row++) {
+      const rowCanvas = document.createElement('canvas')
+      rowCanvas.width = w
+      rowCanvas.height = rowHeight
+      const rowCtx = rowCanvas.getContext('2d')
+      rowCtx.drawImage(threshCanvas, 0, row * rowHeight, w, rowHeight, 0, 0, w, rowHeight)
+
+      const worker = await Tesseract.createWorker('eng')
+      await worker.setParameters({ tessedit_pageseg_mode: '7' })
+      const result = await worker.recognize(rowCanvas)
+      await worker.terminate()
+
+      const words = extractWordsFromText(result.data.text)
+      for (const word of words.filter(w => isValidTileWord(w))) {
+        if (!allFoundWords.includes(word)) allFoundWords.push(word)
+      }
+      console.log(`Row ${row + 1} found:`, words.filter(w => isValidTileWord(w)))
+    }
+
+    console.log('All found words:', allFoundWords)
+
+    if (allFoundWords.length >= 16) {
+      tiles = allFoundWords.slice(0, 16)
+    } else if (allFoundWords.length > 0) {
+      tiles = allFoundWords
       while (tiles.length < 16) {
         tiles.push(`TILE ${tiles.length + 1}`)
       }
-      console.log(`Only found ${validTiles.length} tiles, padded to 16`)
+      console.log(`Only found ${allFoundWords.length} tiles, padded to 16`)
     } else {
       throw new Error('Could not extract tiles from the image. Please try a clearer screenshot.')
     }
