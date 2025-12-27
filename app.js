@@ -208,37 +208,30 @@ function extractWordsFromText(text) {
 
 
 function isValidTileWord(text) {
-  if (!text || text.length === 0) return false
-  if (text.length > 20) return false
-  if (text.length < 2) return false  // Tile words are at least 2 chars
+  if (!text || text.length < 3) return false  // Tile words are at least 3 chars
+  if (text.length > 15) return false
 
   // Filter out common UI text from Connections app
   const uiWords = [
     'CONNECTIONS', 'CONNECTION', 'CREATE', 'SHUFFLE', 'DESELECT', 'SUBMIT',
     'TODAY', 'ARCHIVE', 'PLAY', 'NYT', 'GAMES', 'MENU', 'GAME',
     'MISTAKES', 'REMAINING', 'ONE', 'TWO', 'THREE', 'FOUR', 'FIVE',
-    'NEXT', 'BACK', 'SHARE', 'RESULTS', 'VIEW', 'ALL', 'OF',
+    'NEXT', 'BACK', 'SHARE', 'RESULTS', 'VIEW', 'ALL',
     'GROUPS', 'GROUP', 'CORRECT', 'INCORRECT', 'GUESS', 'GUESSES',
-    'SETTINGS', 'HELP', 'HOW', 'TO', 'THE', 'AND', 'FOR', 'WITH',
-    'YOUR', 'YOU', 'ARE', 'WAS', 'WERE', 'BEEN', 'BEING',
-    'AM', 'PM', 'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
-    'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'
+    'SETTINGS', 'HELP', 'HOW', 'THE', 'AND', 'FOR', 'WITH',
+    'YOUR', 'YOU', 'ARE', 'WAS', 'WERE', 'BEEN', 'BEING'
   ]
 
   if (uiWords.includes(text)) return false
 
-  // Filter out time patterns like "11:29"
-  if (/^\d{1,2}:\d{2}$/.test(text)) return false
-
   // Filter out pure numbers
   if (/^\d+$/.test(text)) return false
 
+  // Filter out repeated characters (OCR noise like "EE", "III")
+  if (/^(.)\1+$/.test(text)) return false
+
   // Must have at least one letter
   if (!/[A-Z]/.test(text)) return false
-
-  // Filter out very short common words that aren't likely tiles
-  const shortCommonWords = ['A', 'I', 'AN', 'AS', 'AT', 'BE', 'BY', 'DO', 'GO', 'HE', 'IF', 'IN', 'IS', 'IT', 'ME', 'MY', 'NO', 'ON', 'OR', 'SO', 'UP', 'US', 'WE']
-  if (shortCommonWords.includes(text)) return false
 
   return true
 }
